@@ -17,6 +17,7 @@
 
 require_once(PEAR_DIR.'Mail/mimeDecode.php');
 require_once(PEAR_DIR.'Mail/RFC822.php');
+require_once(INCLUDE_DIR.'tnef_decoder.php');
 
 class Mail_Parse {
 
@@ -28,6 +29,8 @@ class Mail_Parse {
     var $struct;
 
     var $charset ='UTF-8'; //Default charset.
+
+    var $tnef = false;      // TNEF encoded mail
 
     function Mail_parse($mimeMessage, $charset=null){
 
@@ -43,6 +46,8 @@ class Mail_Parse {
         //Desired charset
         if($charset)
             $this->charset = $charset;
+
+        $this->notes = array();
     }
 
     function decode() {
@@ -53,10 +58,60 @@ class Mail_Parse {
                         'include_bodies'=> $this->include_bodies,
                         'decode_headers'=> $this->decode_headers,
                         'decode_bodies' => $this->decode_bodies);
-        $this->splitBodyHeader();
         $this->struct=Mail_mimeDecode::decode($params);
 
-        return (PEAR::isError($this->struct) || !(count($this->struct->headers)>1))?FALSE:TRUE;
+        if (PEAR::isError($this->struct))
+            return false;
+
+        $this->splitBodyHeader();
+
+        // Handle wrapped emails when forwarded
+        if ($this->struct && $this->struct->parts) {
+            $outer = $this->struct;
+            $ctype = $outer->ctype_primary.'/'.$outer->ctype_secondary;
+            if (strcasecmp($ctype, 'message/rfc822') === 0) {
+                // Capture Delivered-To header from the outer mail
+                $dt = $this->struct->headers['delivered-to'];
+                // Capture Message-Id from outer mail
+                $mid = $this->struct->headers['message-id'];
+
+                $this->struct = $outer->parts[0];
+
+                // Add (clobber) delivered to header from the outer mail
+                if ($dt)
+                    $this->struct->headers['delivered-to'] = $dt;
+                // Ensure the nested mail has a Message-Id
+                if (!isset($this->struct->headers['message-id']))
+                    $this->struct->headers['message-id'] = $mid;
+
+                // Use headers of the wrapped message
+                $headers = array();
+                foreach ($this->struct->headers as $h=>$v)
+                    $headers[mb_convert_case($h, MB_CASE_TITLE)] = $v;
+                $this->header = Format::array_implode(
+                     ": ", "\n", $headers);
+            }
+        }
+
+        // Look for application/tnef attachment and process it
+        foreach ($this->struct->parts as $i=>$part) {
+            if (!$part->parts && $part->ctype_primary == 'application'
+                    && $part->ctype_secondary == 'ms-tnef') {
+                try {
+                    $tnef = new TnefStreamParser($part->body);
+                    $this->tnef = $tnef->getMessage();
+                    // No longer considered an attachment
+                    unset($this->struct->parts[$i]);
+                }
+                catch (TnefException $ex) {
+                    // TNEF will remain an attachment
+                    $this->notes[] = 'TNEF parsing exception: '
+                        .$ex->getMessage();
+                }
+            }
+        }
+
+        return (count($this->struct->headers) > 1);
     }
 
     function splitBodyHeader() {
@@ -96,7 +151,7 @@ class Mail_Parse {
         foreach ($headers as $hdr) {
             list($name, $val) = explode(": ", $hdr, 2);
             # Create list of values if header is specified more than once
-            if ($array[$name] && $as_array) {
+            if (isset($array[$name]) && $as_array) {
                 if (is_array($array[$name])) $array[$name][] = $val;
                 else $array[$name] = array($array[$name], $val);
             } else {
@@ -140,11 +195,15 @@ class Mail_Parse {
 
     function getToAddressList(){
         // Delivered-to incase it was a BBC mail.
-        if (!($header = $this->struct->headers['to']))
-            if (!($header = $this->struct->headers['delivered-to']))
-                return null;
+        $addrs = array();
+        if ($header = $this->struct->headers['to'])
+            $addrs = Mail_Parse::parseAddressList($header);
 
-        return Mail_Parse::parseAddressList($header);
+        if ($header = $this->struct->headers['delivered-to'])
+            $addrs = array_merge($addrs,
+                Mail_Parse::parseAddressList($header));
+
+        return $addrs;
     }
 
     function getCcAddressList(){
@@ -155,7 +214,9 @@ class Mail_Parse {
     }
 
     function getMessageId(){
-        return $this->struct->headers['message-id'];
+        if (!($mid = $this->struct->headers['message-id']))
+            $mid = sprintf('<%s@local>', md5($this->getHeader()));
+        return $mid;
     }
 
     function getSubject(){
@@ -167,6 +228,40 @@ class Mail_Parse {
             return null;
 
         return Mail_Parse::parseAddressList($header);
+    }
+
+    function isBounceNotice() {
+        if (!($body = $this->getPart($this->struct, 'message/delivery-status')))
+            return false;
+
+        $info = self::splitHeaders($body);
+        if (!isset($info['Action']))
+            return false;
+
+        return strcasecmp($info['Action'], 'failed') === 0;
+    }
+
+    function getDeliveryStatusMessage() {
+        $ctype = @strtolower($this->struct->ctype_primary.'/'.$this->struct->ctype_secondary);
+        if ($ctype == 'multipart/report'
+            && isset($this->struct->ctype_parameters['report-type'])
+            && $this->struct->ctype_parameters['report-type'] == 'delivery-status'
+        ) {
+            return sprintf('<pre>%s</pre>',
+                Format::htmlchars(
+                    $this->getPart($this->struct, 'text/plain', 1)
+                ));
+        }
+        return false;
+    }
+
+    function getOriginalMessage() {
+        foreach ($this->struct->parts as $p) {
+            $ctype = $p->ctype_primary.'/'.$p->ctype_secondary;
+            if (strtolower($ctype) === 'message/rfc822')
+                return $p->parts[0];
+        }
+        return null;
     }
 
     function getBody(){
@@ -197,11 +292,14 @@ class Mail_Parse {
         return $body;
     }
 
-    function getPart($struct, $ctypepart) {
+    function getPart($struct, $ctypepart, $recurse=-1) {
 
         if($struct && !$struct->parts) {
             $ctype = @strtolower($struct->ctype_primary.'/'.$struct->ctype_secondary);
-            if($ctype && strcasecmp($ctype,$ctypepart)==0) {
+            if ($struct->disposition
+                    && (strcasecmp($struct->disposition, 'inline') !== 0))
+                return '';
+            if ($ctype && strcasecmp($ctype,$ctypepart)==0) {
                 $content = $struct->body;
                 //Encode to desired encoding - ONLY if charset is known??
                 if (isset($struct->ctype_parameters['charset']))
@@ -212,10 +310,14 @@ class Mail_Parse {
             }
         }
 
+        if ($this->tnef && !strcasecmp($ctypepart, 'text/html')
+                && ($content = $this->tnef->getBody('text/html', $this->charset)))
+            return $content;
+
         $data='';
-        if($struct && $struct->parts) {
+        if($struct && $struct->parts && $recurse) {
             foreach($struct->parts as $i=>$part) {
-                if($part && !$part->disposition && ($text=$this->getPart($part,$ctypepart)))
+                if($part && ($text=$this->getPart($part,$ctypepart,$recurse - 1)))
                     $data.=$text;
             }
         }
@@ -228,6 +330,7 @@ class Mail_Parse {
     }
 
     function getAttachments($part=null){
+        $files=array();
 
         /* Consider this part as an attachment if
          *   * It has a Content-Disposition header
@@ -267,7 +370,8 @@ class Mail_Parse {
                     'type'  => strtolower($part->ctype_primary.'/'.$part->ctype_secondary),
                     );
 
-            if ($part->ctype_parameters['charset'])
+            if ($part->ctype_parameters['charset']
+                    && 0 === strcasecmp($part->ctype_primary, 'text'))
                 $file['data'] = $this->mime_encode($part->body,
                     $part->ctype_parameters['charset']);
             else
@@ -283,10 +387,21 @@ class Mail_Parse {
             return array($file);
         }
 
+        elseif ($this->tnef) {
+            foreach ($this->tnef->attachments as $at) {
+                $files[] = array(
+                    'cid' => @$at->AttachContentId ?: false,
+                    'data' => $at->getData(),
+                    'type' => @$at->AttachMimeTag ?: false,
+                    'name' => $at->getName(),
+                );
+            }
+            return $files;
+        }
+
         if($part==null)
             $part=$this->getStruct();
 
-        $files=array();
         if($part->parts){
             foreach($part->parts as $k=>$p){
                 if($p && ($result=$this->getAttachments($p))) {
@@ -299,6 +414,11 @@ class Mail_Parse {
     }
 
     function getPriority(){
+        if ($this->tnef && isset($this->tnef->Importance))
+            // PidTagImportance is 0, 1, or 2
+            // http://msdn.microsoft.com/en-us/library/ee237166(v=exchg.80).aspx
+            return $this->tnef->Importance + 1;
+
         return Mail_Parse::parsePriority($this->getHeader());
     }
 
@@ -322,13 +442,25 @@ class Mail_Parse {
 
     function parseAddressList($address){
         if (!$address)
-            return false;
-        return Mail_RFC822::parseAddressList($address, null, null,false);
+            return array();
+
+        // Delivered-To may appear more than once in the email headers
+        if (is_array($address))
+            $address = implode(', ', $address);
+
+        $parsed = Mail_RFC822::parseAddressList($address, null, null,false);
+
+        if(PEAR::isError($parsed))
+            return array();
+        return $parsed;
     }
 
     function parse($rawemail) {
         $parser= new Mail_Parse($rawemail);
-        return ($parser && $parser->decode())?$parser:null;
+        if (!$parser->decode())
+            return null;
+
+        return $parser;
     }
 }
 
@@ -358,7 +490,7 @@ class EmailDataParser {
 
         $data =array();
         //FROM address: who sent the email.
-        if(($fromlist = $parser->getFromAddressList()) && !PEAR::isError($fromlist)) {
+        if(($fromlist = $parser->getFromAddressList())) {
             $from=$fromlist[0]; //Default.
             foreach($fromlist as $fromobj) {
                 if(!Validator::is_email($fromobj->mailbox.'@'.$fromobj->host)) continue;
@@ -393,17 +525,28 @@ class EmailDataParser {
             }
         }
 
+        if ($parser->isBounceNotice()) {
+            // Fetch the original References and assign to 'references'
+            if ($msg = $parser->getOriginalMessage())
+                $data['references'] = $msg->headers['references'];
+            // Fetch deliver status report
+            $data['message'] = $parser->getDeliveryStatusMessage();
+            $data['thread-type'] = 'N';
+        }
+        else {
+            // Typical email
+            $data['message'] = Format::stripEmptyLines($parser->getBody());
+            $data['in-reply-to'] = $parser->struct->headers['in-reply-to'];
+            $data['references'] = $parser->struct->headers['references'];
+        }
+
         $data['subject'] = $parser->getSubject();
-        $data['message'] = Format::stripEmptyLines($parser->getBody());
         $data['header'] = $parser->getHeader();
         $data['mid'] = $parser->getMessageId();
         $data['priorityId'] = $parser->getPriority();
         $data['emailId'] = $emailId;
 
-        $data['in-reply-to'] = $parser->struct->headers['in-reply-to'];
-        $data['references'] = $parser->struct->headers['references'];
-
-        if (($replyto = $parser->getReplyTo()) && !PEAR::isError($replyto)) {
+        if (($replyto = $parser->getReplyTo())) {
             $replyto = $replyto[0];
             $data['reply-to'] = $replyto->mailbox.'@'.$replyto->host;
             if ($replyto->personal)

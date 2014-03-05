@@ -125,7 +125,13 @@ function db_create_database($database, $charset='utf8',
 function db_query($query, $logError=true) {
     global $ost, $__db;
 
-    $res = $__db->query($query);
+    $tries = 3;
+    do {
+        $res = $__db->query($query);
+        // Retry the query due to deadlock error (#1213)
+        // TODO: Consider retry on #1205 (lock wait timeout exceeded)
+        // TODO: Log warning
+    } while (!$res && --$tries && $__db->errno == 1213);
 
     if(!$res && $logError && $ost) { //error reporting
         $msg='['.$query.']'."\n\n".db_error();
@@ -160,7 +166,7 @@ function db_result($res, $row=0) {
     return $value;
 }
 
-function db_fetch_array($res, $mode=MYSQL_ASSOC) {
+function db_fetch_array($res, $mode=MYSQLI_ASSOC) {
     return ($res) ? db_output($res->fetch_array($mode)) : NULL;
 }
 
@@ -233,7 +239,7 @@ function db_input($var, $quote=true) {
 
     if(is_array($var))
         return array_map('db_input', $var, array_fill(0, count($var), $quote));
-    elseif($var && preg_match("/^\d+(\.\d+)?$/", $var))
+    elseif($var && preg_match("/^(?:\d+\.\d+|[1-9]\d*)$/S", $var))
         return $var;
 
     return db_real_escape($var, $quote);

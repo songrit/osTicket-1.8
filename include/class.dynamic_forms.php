@@ -54,10 +54,13 @@ class DynamicForm extends VerySimpleModel {
     }
 
     function getDynamicFields() {
-        if (!isset($this->_dfields))
+        if (!isset($this->_dfields)) {
             $this->_dfields = DynamicFormField::objects()
                 ->filter(array('form_id'=>$this->id))
                 ->all();
+            foreach ($this->_dfields as $f)
+                $f->setForm($this);
+        }
         return $this->_dfields;
     }
 
@@ -146,22 +149,6 @@ class UserForm extends DynamicForm {
     static function objects() {
         $os = parent::objects();
         return $os->filter(array('type'=>'U'));
-    }
-
-    function getFields($cache=true) {
-        $fields = parent::getFields($cache);
-        foreach ($fields as $f) {
-            if ($f->get('name') == 'email') {
-                $f->getConfiguration();
-                $f->_config['classes'] = 'auto email typeahead';
-                $f->_config['autocomplete'] = false;
-            }
-            elseif ($f->get('name') == 'name') {
-                $f->getConfiguration();
-                $f->_config['classes'] = 'auto name';
-            }
-        }
-        return $fields;
     }
 
     static function getUserForm() {
@@ -258,7 +245,7 @@ class TicketForm extends DynamicForm {
     static function updateDynamicDataView($answer, $data) {
         // TODO: Detect $data['dirty'] for value and value_id
         // We're chiefly concerned with Ticket form answers
-        if (!($e = $answer->getEntry()) || $e->get('object_type') != 'T')
+        if (!($e = $answer->getEntry()) || $e->getForm()->get('type') != 'T')
             return;
 
         // $record = array();
@@ -316,7 +303,8 @@ Signal::connect('model.updated',
     array('TicketForm', 'dropDynamicDataView'),
     'DynamicFormField',
     // TODO: Lookup the dynamic form to verify {type == 'T'}
-    function($o, $d) { return isset($d['dirty']) && isset($d['dirty']['name']); });
+    function($o, $d) { return isset($d['dirty'])
+        && (isset($d['dirty']['name']) || isset($d['dirty']['type'])); });
 
 require_once(INCLUDE_DIR . "class.json.php");
 
@@ -890,13 +878,20 @@ class SelectionField extends FormField {
     }
 
     function parse($value) {
-        return $this->to_php($value);
+        $config = $this->getConfiguration();
+        if (is_int($value))
+            return $this->to_php($this->getWidget()->getEnteredValue(), (int) $value);
+        elseif (!$config['typeahead'])
+            return $this->to_php(null, (int) $value);
+        else
+            return $this->to_php($value);
     }
 
     function to_php($value, $id=false) {
-        $item = DynamicListItem::lookup($id ? $id : $value);
+        if ($id && is_int($id))
+            $item = DynamicListItem::lookup($id);
         # Attempt item lookup by name too
-        if (!$item) {
+        if (!$item || ($value !== null && $value != $item->get('value'))) {
             $item = DynamicListItem::lookup(array(
                 'value'=>$value,
                 'list_id'=>$this->getListId()));
@@ -911,12 +906,17 @@ class SelectionField extends FormField {
     }
 
     function toString($item) {
-        return ($item instanceof DynamicListItem) ? $item->toString() : $item;
+        return ($item instanceof DynamicListItem)
+            ? $item->toString() : (string) $item;
     }
 
     function validateEntry($item) {
+        $config = $this->getConfiguration();
         parent::validateEntry($item);
         if ($item && !$item instanceof DynamicListItem)
+            $this->_errors[] = 'Select a value from the list';
+        elseif ($item && $config['typeahead']
+                && $this->getWidget()->getEnteredValue() != $item->get('value'))
             $this->_errors[] = 'Select a value from the list';
     }
 
@@ -926,7 +926,13 @@ class SelectionField extends FormField {
                 'id'=>1, 'label'=>'Widget', 'required'=>false,
                 'default'=>false,
                 'choices'=>array(false=>'Drop Down', true=>'Typeahead'),
-                'hint'=>'Typeahead will work better for large lists')),
+                'hint'=>'Typeahead will work better for large lists'
+            )),
+            'prompt' => new TextboxField(array(
+                'id'=>2, 'label'=>'Prompt', 'required'=>false, 'default'=>'',
+                'hint'=>'Leading text shown before a value is selected',
+                'configuration'=>array('size'=>40, 'length'=>40),
+            )),
         );
     }
 
@@ -941,7 +947,7 @@ class SelectionField extends FormField {
 }
 
 class SelectionWidget extends ChoicesWidget {
-    function render() {
+    function render($mode=false) {
         $config = $this->field->getConfiguration();
         $value = false;
         if ($this->value instanceof DynamicListItem) {
@@ -951,26 +957,27 @@ class SelectionWidget extends ChoicesWidget {
         } elseif ($this->value) {
             // Loaded from POST
             $value = $this->value;
-            $name = DynamicListItem::lookup($value);
-            $name = ($name) ? $name->get('value') : $value;
+            $name = $this->getEnteredValue();
         }
-
-        if (!$config['typeahead']) {
+        if (!$config['typeahead'] || $mode=='search') {
             $this->value = $value;
-            return parent::render();
+            return parent::render($mode);
         }
 
         $source = array();
         foreach ($this->field->getList()->getItems() as $i)
             $source[] = array(
-                'value' => $i->get('value'),
+                'value' => $i->get('value'), 'id' => $i->get('id'),
                 'info' => $i->get('value')." -- ".$i->get('extra'),
             );
         ?>
         <span style="display:inline-block">
         <input type="text" size="30" name="<?php echo $this->name; ?>"
             id="<?php echo $this->name; ?>" value="<?php echo $name; ?>"
-            autocomplete="off" />
+            placeholder="<?php echo $config['prompt'];
+            ?>" autocomplete="off" />
+        <input type="hidden" name="<?php echo $this->name;
+            ?>_id" id="<?php echo $this->name; ?>_id" value="<?php echo $value; ?>"/>
         <script type="text/javascript">
         $(function() {
             $('input#<?php echo $this->name; ?>').typeahead({
@@ -978,12 +985,26 @@ class SelectionWidget extends ChoicesWidget {
                 property: 'info',
                 onselect: function(item) {
                     $('input#<?php echo $this->name; ?>').val(item['value'])
+                    $('input#<?php echo $this->name; ?>_id').val(item['id'])
                 }
             });
         });
         </script>
         </span>
         <?php
+    }
+
+    function getValue() {
+        $data = $this->field->getSource();
+        // Search for HTML form name first
+        if (isset($data[$this->name.'_id']))
+            return (int) $data[$this->name.'_id'];
+        return parent::getValue();
+    }
+
+    function getEnteredValue() {
+        // Used to verify typeahead fields
+        return parent::getValue();
     }
 }
 ?>

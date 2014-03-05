@@ -224,12 +224,11 @@ class osTicket {
     function alertAdmin($subject, $message, $log=false) {
 
         //Set admin's email address
-        if(!($to=$this->getConfig()->getAdminEmail()))
-            $to=ADMIN_EMAIL;
-
+        if (!($to = $this->getConfig()->getAdminEmail()))
+            $to = ADMIN_EMAIL;
 
         //append URL to the message
-        $message.="\n\n".THISPAGE;
+        $message.="\n\n".$this->getConfig()->getBaseUrl();
 
         //Try getting the alert email.
         $email=null;
@@ -398,7 +397,10 @@ class osTicket {
         $file = str_replace('\\','/', $frame['file']);
         $path = substr($file, strlen(ROOT_DIR));
         if($path && ($pos=strpos($_SERVER['SCRIPT_NAME'], $path))!==false)
-            return substr($_SERVER['SCRIPT_NAME'], 0, $pos);
+            return ($pos) ? substr($_SERVER['SCRIPT_NAME'], 0, $pos) : '/';
+
+        if (self::is_cli())
+            return '/';
 
         return null;
     }

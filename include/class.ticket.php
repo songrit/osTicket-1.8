@@ -98,9 +98,6 @@ class Ticket {
         $this->topic = null;
         $this->thread = null;
 
-        //REQUIRED: Preload thread obj - checked on lookup!
-        $this->getThread();
-
         return true;
     }
 
@@ -108,8 +105,8 @@ class Ticket {
         if (!$this->_answers) {
             foreach (DynamicFormEntry::forTicket($this->getId(), true) as $form)
                 foreach ($form->getAnswers() as $answer)
-                    $this->_answers[$answer->getField()->get('name')]
-                        = $answer;
+                    if ($tag = mb_strtolower($answer->getField()->get('name')))
+                        $this->_answers[$tag] = $answer;
         }
     }
 
@@ -205,7 +202,7 @@ class Ticket {
 
     function getAuthToken() {
         # XXX: Support variable email address (for CCs)
-        return md5($this->getId() . $this->getEmail() . SECRET_SALT);
+        return md5($this->getId() . strtolower($this->getEmail()) . SECRET_SALT);
     }
 
     function getName(){
@@ -785,6 +782,10 @@ class Ticket {
             $msg = $this->replaceVars($msg->asArray(), array('message' => $message));
 
             $recipients=$sentlist=array();
+            //Exclude the auto responding email just incase it's from staff member.
+            if ($message->isAutoReply())
+                $sentlist[] = $this->getEmail();
+
             //Alert admin??
             if($cfg->alertAdminONNewTicket()) {
                 $alert = str_replace('%{recipient}', 'Admin', $msg['body']);
@@ -1096,6 +1097,7 @@ class Ticket {
                 return $this->getOwner();
                 break;
             default:
+                $tag = mb_strtolower($tag);
                 if (isset($this->_answers[$tag]))
                     // The answer object is retrieved here which will
                     // automatically invoke the toString() method when the
@@ -1374,7 +1376,7 @@ class Ticket {
         if(!$alerts) return $message; //Our work is done...
 
         $autorespond = true;
-        if ($autorespond && $message->isAutoResponse())
+        if ($autorespond && $message->isBounceOrAutoReply())
             $autorespond=false;
 
         $this->onMessage($autorespond, $message); //must be called b4 sending alerts to staff.
@@ -1673,12 +1675,15 @@ class Ticket {
 
     function delete() {
 
+        //delete just orphaned ticket thread & associated attachments.
+        // Fetch thread prior to removing ticket entry
+        $t = $this->getThread();
+
         $sql = 'DELETE FROM '.TICKET_TABLE.' WHERE ticket_id='.$this->getId().' LIMIT 1';
         if(!db_query($sql) || !db_affected_rows())
             return false;
 
-        //delete just orphaned ticket thread & associated attachments.
-        $this->getThread()->delete();
+        $t->delete();
 
         foreach (DynamicFormEntry::forTicket($this->getId()) as $form)
             $form->delete();
@@ -1788,8 +1793,7 @@ class Ticket {
         return ($id
                 && is_numeric($id)
                 && ($ticket= new Ticket($id))
-                && $ticket->getId()==$id
-                && $ticket->getThread())
+                && $ticket->getId()==$id)
             ?$ticket:null;
     }
 
@@ -1833,11 +1837,12 @@ class Ticket {
         if(!$staff || (!is_object($staff) && !($staff=Staff::lookup($staff))) || !$staff->isStaff())
             return null;
 
-        $where = array('ticket.staff_id='.db_input($staff->getId()));
+        $where = array('(ticket.staff_id='.db_input($staff->getId()) .' AND ticket.status="open")');
         $where2 = '';
 
         if(($teams=$staff->getTeams()))
-            $where[] = 'ticket.team_id IN('.implode(',', db_input(array_filter($teams))).')';
+            $where[] = ' ( ticket.team_id IN('.implode(',', db_input(array_filter($teams)))
+                        .') AND ticket.status="open")';
 
         if(!$staff->showAssignedOnly() && ($depts=$staff->getDepts())) //Staff with limited access just see Assigned tickets.
             $where[] = 'ticket.dept_id IN('.implode(',', db_input($depts)).') ';
@@ -1971,11 +1976,17 @@ class Ticket {
             $vars['field.'.$f->get('id')] = $f->toString($f->getClean());
 
         // Unpack the basic user information
-        $interesting = array('name', 'email');
-        $user_form = UserForm::getUserForm()->getForm($vars);
-        foreach ($user_form->getFields() as $f)
-            if (in_array($f->get('name'), $interesting))
-                $vars[$f->get('name')] = $f->toString($f->getClean());
+        if ($vars['uid'] && ($user = User::lookup($vars['uid']))) {
+            $vars['email'] = $user->getEmail();
+            $vars['name'] = $user->getName();
+        }
+        else {
+            $interesting = array('name', 'email');
+            $user_form = UserForm::getUserForm()->getForm($vars);
+            foreach ($user_form->getFields() as $f)
+                if (in_array($f->get('name'), $interesting))
+                    $vars[$f->get('name')] = $f->toString($f->getClean());
+        }
 
         //Init ticket filters...
         $ticket_filter = new TicketFilter($origin, $vars);
@@ -1999,7 +2010,7 @@ class Ticket {
                 $fields['topicId']  = array('type'=>'int',  'required'=>1, 'error'=>'Select help topic');
                 break;
             case 'staff':
-                $fields['deptId']   = array('type'=>'int',  'required'=>1, 'error'=>'Dept. required');
+                $fields['deptId']   = array('type'=>'int',  'required'=>0, 'error'=>'Dept. required');
                 $fields['topicId']  = array('type'=>'int',  'required'=>1, 'error'=>'Topic required');
                 $fields['duedate']  = array('type'=>'date', 'required'=>0, 'error'=>'Invalid date - must be MM/DD/YY');
             case 'api':
@@ -2028,11 +2039,6 @@ class Ticket {
 
         if (!$errors) {
 
-            if ($vars['uid'] && ($user = User::lookup($vars['uid']))) {
-                $vars['email'] = $user->getEmail();
-                $vars['name'] = $user->getName();
-            }
-
             # Perform ticket filter actions on the new ticket arguments
             if ($ticket_filter) $ticket_filter->apply($vars);
 
@@ -2052,6 +2058,10 @@ class Ticket {
         # Some things will need to be unpacked back into the scope of this
         # function
         if (isset($vars['autorespond'])) $autorespond=$vars['autorespond'];
+
+        # Apply filter-specific priority
+        if ($vars['priorityId'])
+            $form->setAnswer('priority', null, $vars['priorityId']);
 
         // OK...just do it.
         $deptId=$vars['deptId']; //pre-selected Dept if any.
@@ -2151,15 +2161,8 @@ class Ticket {
 
         # Messages that are clearly auto-responses from email systems should
         # not have a return 'ping' message
-        if ($autorespond && $message && $message->isAutoResponse())
-            $autorespond=false;
-
-        //Don't auto respond to mailer daemons.
-        if( $autorespond &&
-            (strpos(strtolower($vars['email']),'mailer-daemon@')!==false
-             || strpos(strtolower($vars['email']),'postmaster@')!==false)) {
-            $autorespond=false;
-        }
+        if ($autorespond && $message->isAutoReply())
+            $autorespond = false;
 
         //post canned auto-response IF any (disables new ticket auto-response).
         if ($vars['cannedResponseId']
@@ -2172,6 +2175,11 @@ class Ticket {
         // XXX: Dept. setting doesn't affect canned responses.
         if($autorespond && $dept && !$dept->autoRespONNewTicket())
             $autorespond=false;
+
+        //Don't send alerts to staff when the message is a bounce
+        //  this is necessary to avoid possible loop (especially on new ticket)
+        if ($alertstaff && $message->isBounce())
+            $alertstaff = false;
 
         /***** See if we need to send some alerts ****/
         $ticket->onNewTicket($message, $autorespond, $alertstaff);

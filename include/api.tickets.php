@@ -39,7 +39,7 @@ class TicketApiController extends ApiController {
         if(!strcasecmp($format, 'email')) {
             $supported = array_merge($supported, array('header', 'mid',
                 'emailId', 'ticketId', 'reply-to', 'reply-to-name',
-                'in-reply-to', 'references'));
+                'in-reply-to', 'references', 'thread-type'));
             $supported['attachments']['*'][] = 'cid';
         }
 
@@ -68,6 +68,15 @@ class TicketApiController extends ApiController {
                 elseif ($attachment['encoding'] && !strcasecmp($attachment['encoding'], 'base64')) {
                     if(!($attachment['data'] = base64_decode($attachment['data'], true)))
                         $attachment['error'] = sprintf('%s: Poorly encoded base64 data', Format::htmlchars($attachment['name']));
+                }
+                if (!$attachment['error']
+                        && ($size = $ost->getConfig()->getMaxFileSize())
+                        && ($fsize = $attachment['size'] ?: strlen($attachment['data']))
+                        && $fsize > $size) {
+                    $attachment['error'] = sprintf('File %s (%s) is too big. Maximum of %s allowed',
+                            Format::htmlchars($attachment['name']),
+                            Format::file_size($fsize),
+                            Format::file_size($size));
                 }
             }
             unset($attachment);
@@ -141,13 +150,10 @@ class TicketApiController extends ApiController {
         return $ticket;
     }
 
-    function processEmail() {
+    function processEmail($data=false) {
 
-        $data = $this->getEmailRequest();
-        if($data['ticketId'] && ($ticket=Ticket::lookup($data['ticketId']))) {
-            if(($msgid=$ticket->postMessage($data, 'Email')))
-                return $ticket;
-        }
+        if (!$data)
+            $data = $this->getEmailRequest();
 
         if (($thread = ThreadEntry::lookupByEmailHeaders($data))
                 && $thread->postEmail($data)) {

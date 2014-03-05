@@ -196,9 +196,18 @@ class Bootstrap {
                     return iconv($from, $to, $str); }
             }
             else {
-                function mb_strpos($a, $b) { return strpos($a, $b); }
-                function mb_strlen($str) { return strlen($str); }
-                function mb_substr($a, $b, $c=null) { return substr($a, $b, $c); }
+                function mb_strpos($a, $b) {
+                    $c = preg_replace('/^(\X*)'.preg_quote($b).'.*$/us', '$1', $a);
+                    return ($c===$a) ? false : mb_strlen($c);
+                }
+                function mb_strlen($str) {
+                    $a = array();
+                    return preg_match_all('/\X/u', $str, $a);
+                }
+                function mb_substr($a, $b, $c=null) {
+                    return preg_replace(
+                        "/^\X{{$b}}(\X".($c ? "{{$c}}" : "*").").*/us",'$1',$a);
+                }
                 function mb_convert_encoding($str, $to, $from='utf-8') {
                     if (strcasecmp($to, $from) == 0)
                         return $str;
@@ -261,7 +270,11 @@ class Bootstrap {
 }
 
 #Get real path for root dir ---linux and windows
-define('ROOT_DIR',str_replace('\\', '/', realpath(dirname(__FILE__))).'/');
+$here = dirname(__FILE__);
+$here = ($h = realpath($here)) ? $h : $here;
+define('ROOT_DIR',str_replace('\\', '/', $here.'/'));
+unset($here); unset($h);
+
 define('INCLUDE_DIR',ROOT_DIR.'include/'); //Change this if include is moved outside the web path.
 define('PEAR_DIR',INCLUDE_DIR.'pear/');
 define('SETUP_DIR',ROOT_DIR.'setup/');

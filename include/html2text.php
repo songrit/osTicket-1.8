@@ -49,7 +49,7 @@ function convert_html_to_text($html, $width=74) {
         HtmlStylesheet::fromArray(array(
             'html' => array('white-space' => 'pre'), # Don't wrap footnotes
             'p' => array('margin-bottom' => '1em'),
-            'pre' => array('border-width' => '1em', 'white-space' => 'pre'),
+            'pre' => array('white-space' => 'pre'),
         ))
     );
     $options = array();
@@ -201,7 +201,7 @@ class HtmlInlineElement {
                 case 'normal':
                 default:
                     if ($after_block) $more = ltrim($more);
-                    $more = preg_replace('/\s+/m', ' ', $more);
+                    $more = preg_replace('/[ \r\n\t\f]+/mu', ' ', $more);
                 }
             }
             elseif ($c instanceof HtmlInlineElement) {

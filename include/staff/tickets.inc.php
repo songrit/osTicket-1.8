@@ -61,19 +61,21 @@ $qwhere ='';
 
 $depts=$thisstaff->getDepts();
 $qwhere =' WHERE ( '
-        .'  ticket.staff_id='.db_input($thisstaff->getId());
+        .'  ( ticket.staff_id='.db_input($thisstaff->getId())
+        .' AND ticket.status="open")';
 
 if(!$thisstaff->showAssignedOnly())
     $qwhere.=' OR ticket.dept_id IN ('.($depts?implode(',', db_input($depts)):0).')';
 
 if(($teams=$thisstaff->getTeams()) && count(array_filter($teams)))
-    $qwhere.=' OR ticket.team_id IN('.implode(',', db_input(array_filter($teams))).') ';
+    $qwhere.=' OR (ticket.team_id IN ('.implode(',', db_input(array_filter($teams)))
+            .') AND ticket.status="open")';
 
 $qwhere .= ' )';
 
 //STATUS
 if($status) {
-    $qwhere.=' AND status='.db_input(strtolower($status));
+    $qwhere.=' AND ticket.status='.db_input(strtolower($status));
 }
 
 if (isset($_REQUEST['ownerId'])) {
@@ -143,8 +145,8 @@ if ($_REQUEST['advsid'] && isset($_SESSION['adv_'.$_REQUEST['advsid']])) {
         db_input($_SESSION['adv_'.$_REQUEST['advsid']])).')';
 }
 
-$sortOptions=array('date'=>'effective_date','ID'=>'ticketID',
-    'pri'=>'priority_id','name'=>'user.name','subj'=>'subject',
+$sortOptions=array('date'=>'effective_date','ID'=>'ticket.ticketID',
+    'pri'=>'pri.priority_urgency','name'=>'user.name','subj'=>'cdata.subject',
     'status'=>'ticket.status','assignee'=>'assigned','staff'=>'staff',
     'dept'=>'dept_name');
 
@@ -179,16 +181,16 @@ if(!$order_by ) {
     elseif(!strcasecmp($status,'closed'))
         $order_by='ticket.closed, ticket.created'; //No priority sorting for closed tickets.
     elseif($showoverdue) //priority> duedate > age in ASC order.
-        $order_by='priority_id, ISNULL(duedate) ASC, duedate ASC, effective_date ASC, ticket.created';
+        $order_by='pri.priority_urgency ASC, ISNULL(ticket.duedate) ASC, ticket.duedate ASC, effective_date ASC, ticket.created';
     else //XXX: Add due date here?? No -
-        $order_by='priority_id, effective_date DESC, ticket.created';
+        $order_by='pri.priority_urgency ASC, effective_date DESC, ticket.created';
 }
 
 $order=$order?$order:'DESC';
 if($order_by && strpos($order_by,',') && $order)
     $order_by=preg_replace('/(?<!ASC|DESC),/', " $order,", $order_by);
 
-$sort=$_REQUEST['sort']?strtolower($_REQUEST['sort']):'priority_id'; //Urgency is not on display table.
+$sort=$_REQUEST['sort']?strtolower($_REQUEST['sort']):'pri.priority_urgency'; //Urgency is not on display table.
 $x=$sort.'_sort';
 $$x=' class="'.strtolower($order).'" ';
 
@@ -224,7 +226,7 @@ $qselect.=' ,IF(ticket.duedate IS NULL,IF(sla.id IS NULL, NULL, DATE_ADD(ticket.
          .' ,CONCAT_WS(" ", staff.firstname, staff.lastname) as staff, team.name as team '
          .' ,IF(staff.staff_id IS NULL,team.name,CONCAT_WS(" ", staff.lastname, staff.firstname)) as assigned '
          .' ,IF(ptopic.topic_pid IS NULL, topic.topic, CONCAT_WS(" / ", ptopic.topic, topic.topic)) as helptopic '
-         .' ,cdata.priority_id, cdata.subject';
+         .' ,cdata.priority_id, cdata.subject, pri.priority_desc, pri.priority_color';
 
 $qfrom.=' LEFT JOIN '.TICKET_LOCK_TABLE.' tlock ON (ticket.ticket_id=tlock.ticket_id AND tlock.expire>NOW()
                AND tlock.staff_id!='.db_input($thisstaff->getId()).') '
@@ -233,15 +235,10 @@ $qfrom.=' LEFT JOIN '.TICKET_LOCK_TABLE.' tlock ON (ticket.ticket_id=tlock.ticke
        .' LEFT JOIN '.SLA_TABLE.' sla ON (ticket.sla_id=sla.id AND sla.isactive=1) '
        .' LEFT JOIN '.TOPIC_TABLE.' topic ON (ticket.topic_id=topic.topic_id) '
        .' LEFT JOIN '.TOPIC_TABLE.' ptopic ON (ptopic.topic_id=topic.topic_pid) '
-       .' LEFT JOIN '.TABLE_PREFIX.'ticket__cdata cdata ON (cdata.ticket_id = ticket.ticket_id) ';
+       .' LEFT JOIN '.TABLE_PREFIX.'ticket__cdata cdata ON (cdata.ticket_id = ticket.ticket_id) '
+       .' LEFT JOIN '.PRIORITY_TABLE.' pri ON (pri.priority_id = cdata.priority_id)';
 
 TicketForm::ensureDynamicDataView();
-
-// Fetch priority information
-$res = db_query('select * from '.PRIORITY_TABLE);
-$prios = array();
-while ($row = db_fetch_array($res))
-    $prios[$row['priority_id']] = $row;
 
 $query="$qselect $qfrom $qwhere ORDER BY $order_by $order LIMIT ".$pageNav->getStart().",".$pageNav->getLimit();
 //echo $query;
@@ -418,8 +415,8 @@ if ($results) {
                         $displaystatus="<b>$displaystatus</b>";
                     echo "<td>$displaystatus</td>";
                 } else { ?>
-                <td class="nohover" align="center" style="background-color:<?php echo $prios[$row['priority_id']]['priority_color']; ?>;">
-                    <?php echo $prios[$row['priority_id']]['priority_desc']; ?></td>
+                <td class="nohover" align="center" style="background-color:<?php echo $row['priority_color']; ?>;">
+                    <?php echo $row['priority_desc']; ?></td>
                 <?php
                 }
                 ?>
@@ -622,7 +619,8 @@ if ($results) {
             elseif (!$f->hasData())
                 continue;
             ?><label><?php echo $f->getLabel(); ?>:</label>
-                <div style="display:inline-block;width: 12.5em;"><?php $f->render(); ?></div>
+                <div style="display:inline-block;width: 12.5em;"><?php
+                     $f->render('search'); ?></div>
         <?php } ?>
         </fieldset>
         <p>

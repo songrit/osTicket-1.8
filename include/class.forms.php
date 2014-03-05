@@ -224,6 +224,17 @@ class FormField {
         # form
         if ($this->get('required') && !$value && $this->hasData())
             $this->_errors[] = sprintf('%s is a required field', $this->getLabel());
+
+        # Perform declared validators for the field
+        if ($vs = $this->get('validators')) {
+            if (is_array($vs)) {
+                foreach ($vs as $validator)
+                    if (is_callable($validator))
+                        $validator($this, $value);
+            }
+            elseif (is_callable($vs))
+                $vs($this, $value);
+        }
     }
 
     /**
@@ -482,6 +493,11 @@ class TextboxField extends FormField {
                 'id'=>4, 'label'=>'Validation Error', 'default'=>'',
                 'configuration'=>array('size'=>40, 'length'=>60),
                 'hint'=>'Message shown to user if the input does not match the validator')),
+            'placeholder' => new TextboxField(array(
+                'id'=>5, 'label'=>'Placeholder', 'required'=>false, 'default'=>'',
+                'hint'=>'Text shown in before any input from the user',
+                'configuration'=>array('size'=>40, 'length'=>40),
+            )),
         );
     }
 
@@ -529,6 +545,11 @@ class TextareaField extends FormField {
             'html' => new BooleanField(array(
                 'id'=>4, 'label'=>'HTML', 'required'=>false, 'default'=>true,
                 'configuration'=>array('desc'=>'Allow HTML input in this box'))),
+            'placeholder' => new TextboxField(array(
+                'id'=>5, 'label'=>'Placeholder', 'required'=>false, 'default'=>'',
+                'hint'=>'Text shown in before any input from the user',
+                'configuration'=>array('size'=>40, 'length'=>40),
+            )),
         );
     }
 
@@ -641,6 +662,16 @@ class ChoiceField extends FormField {
                 spelling changes, specify key:value names to preserve
                 entries if the list item names change',
                 'configuration'=>array('html'=>false)
+            )),
+            'default' => new TextboxField(array(
+                'id'=>3, 'label'=>'Default', 'required'=>false, 'default'=>'',
+                'hint'=>'(Enter a key). Value selected from the list initially',
+                'configuration'=>array('size'=>20, 'length'=>40),
+            )),
+            'prompt' => new TextboxField(array(
+                'id'=>2, 'label'=>'Prompt', 'required'=>false, 'default'=>'',
+                'hint'=>'Leading text shown before a value is selected',
+                'configuration'=>array('size'=>40, 'length'=>40),
             )),
         );
     }
@@ -798,6 +829,10 @@ class PriorityField extends ChoiceField {
     function hasIdValue() {
         return true;
     }
+    function isChangeable() {
+        return $this->getForm()->get('type') != 'T' ||
+            $this->get('name') != 'priority';
+    }
 
     function getChoices() {
         global $cfg;
@@ -833,7 +868,13 @@ class PriorityField extends ChoiceField {
     }
 
     function getConfigurationOptions() {
-        return array();
+        return array(
+            'prompt' => new TextboxField(array(
+                'id'=>2, 'label'=>'Prompt', 'required'=>false, 'default'=>'',
+                'hint'=>'Leading text shown before a value is selected',
+                'configuration'=>array('size'=>40, 'length'=>40),
+            )),
+        );
     }
 }
 FormField::addFieldTypes('Built-in Lists', function() {
@@ -882,8 +923,9 @@ class TextboxWidget extends Widget {
         ?>
         <span style="display:inline-block">
         <input type="text" id="<?php echo $this->name; ?>"
-            <?php echo $size . " " . $maxlength; ?>
-            <?php echo $classes.' '.$autocomplete; ?>
+            <?php echo $size . " " . $maxlength
+                .' '.$classes.' '.$autocomplete
+                .' placeholder="'.$config['placeholder'].'"'; ?>
             name="<?php echo $this->name; ?>"
             value="<?php echo Format::htmlchars($this->value); ?>"/>
         </span>
@@ -905,7 +947,8 @@ class TextareaWidget extends Widget {
             $class = 'class="richtext no-bar small"';
         ?>
         <span style="display:inline-block;width:100%">
-        <textarea <?php echo $rows." ".$cols." ".$maxlength." ".$class; ?>
+        <textarea <?php echo $rows." ".$cols." ".$maxlength." ".$class
+                .' placeholder="'.$config['placeholder'].'"'; ?>
             name="<?php echo $this->name; ?>"><?php
                 echo Format::htmlchars($this->value);
             ?></textarea>
@@ -942,17 +985,27 @@ class PhoneNumberWidget extends Widget {
 }
 
 class ChoicesWidget extends Widget {
-    function render() {
+    function render($mode=false) {
         $config = $this->field->getConfiguration();
         // Determine the value for the default (the one listed if nothing is
         // selected)
         $choices = $this->field->getChoices();
-        $def_key = $this->field->get('default');
-        $have_def = isset($choices[$def_key]);
-        if (!$have_def)
-            $def_val = 'Select '.$this->field->get('label');
-        else
-            $def_val = $choices[$def_key];
+        // We don't consider the 'default' when rendering in 'search' mode
+        $have_def = false;
+        if ($mode != 'search') {
+            $def_key = $this->field->get('default');
+            if (!$def_key && $config['default'])
+                $def_key = $config['default'];
+            $have_def = isset($choices[$def_key]);
+            if (!$have_def)
+                $def_val = ($config['prompt'])
+                   ? $config['prompt'] : 'Select';
+            else
+                $def_val = $choices[$def_key];
+        } else {
+            $def_val = ($config['prompt'])
+                ? $config['prompt'] : 'Select';
+        }
         $value = $this->value;
         if ($value === null && $have_def)
             $value = $def_key;

@@ -376,8 +376,26 @@ Class ThreadEntry {
         return $this->ht['headers'];
     }
 
-    function isAutoResponse() {
-        return $this->getEmailHeader()?TicketFilter::isAutoResponse($this->getEmailHeader()):false;
+    function isAutoReply() {
+
+        if (!isset($this->is_autoreply))
+            $this->is_autoreply = $this->getEmailHeader()
+                ?  TicketFilter::isAutoReply($this->getEmailHeader()) : false;
+
+        return $this->is_autoreply;
+    }
+
+    function isBounce() {
+
+        if (!isset($this->is_bounce))
+            $this->is_bounce = $this->getEmailHeader()
+                ? TicketFilter::isBounce($this->getEmailHeader()) : false;
+
+        return $this->is_bounce;
+    }
+
+    function isBounceOrAutoReply() {
+        return ($this->isAutoReply() || $this->isBounce());
     }
 
     //Web uploads - caller is expected to format, validate and set any errors.
@@ -575,6 +593,7 @@ Class ThreadEntry {
             'ip' =>     '',
             'reply_to' => $this,
         );
+        $errors = array();
 
         if (isset($mailinfo['attachments']))
             $vars['attachments'] = $mailinfo['attachments'];
@@ -591,13 +610,21 @@ Class ThreadEntry {
         elseif ($staff_id = Staff::getIdByEmail($mailinfo['email'])) {
             $vars['staffId'] = $staff_id;
             $poster = Staff::lookup($staff_id);
-            $errors = array();
             $vars['note'] = $body;
             return $ticket->postNote($vars, $errors, $poster);
         }
         elseif (Email::getIdByEmail($mailinfo['email'])) {
             // Don't process the email -- it came FROM this system
             return true;
+        }
+        // Support the mail parsing system declaring a thread-type
+        elseif (isset($mailinfo['thread-type'])) {
+            switch ($mailinfo['thread-type']) {
+            case 'N':
+                $vars['note'] = $body;
+                $poster = $mailinfo['email'];
+                return $ticket->postNote($vars, $errors, $poster);
+            }
         }
         // TODO: Consider security constraints
         else {
@@ -744,7 +771,7 @@ Class ThreadEntry {
         $subject = $mailinfo['subject'];
         $match = array();
         if ($subject && $mailinfo['email']
-                && preg_match("/#[\p{L}-]+?([0-9]{1,10})/u", $subject, $match)
+                && preg_match("/#(?:[\p{L}-]+)?([0-9]{1,10})/u", $subject, $match)
                 && ($tid = Ticket::getIdByExtId((int)$match[1], $mailinfo['email']))
                 )
             // Return last message for the thread

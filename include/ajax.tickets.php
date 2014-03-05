@@ -106,10 +106,12 @@ class TicketsAjaxAPI extends AjaxController {
         $select = 'SELECT ticket.ticket_id';
         $from = ' FROM '.TICKET_TABLE.' ticket ';
         //Access control.
-        $where = ' WHERE ( ticket.staff_id='.db_input($thisstaff->getId());
+        $where = ' WHERE ( (ticket.staff_id='.db_input($thisstaff->getId())
+                    .' AND ticket.status="open" )';
 
         if(($teams=$thisstaff->getTeams()) && count(array_filter($teams)))
-            $where.=' OR ticket.team_id IN('.implode(',', db_input(array_filter($teams))).')';
+            $where.=' OR (ticket.team_id IN ('.implode(',', db_input(array_filter($teams)))
+                   .' ) AND ticket.status="open")';
 
         if(!$thisstaff->showAssignedOnly() && ($depts=$thisstaff->getDepts()))
             $where.=' OR ticket.dept_id IN ('.implode(',', db_input($depts)).')';
@@ -211,11 +213,12 @@ class TicketsAjaxAPI extends AjaxController {
         foreach (TicketForm::getInstance()->getFields() as $f) {
             if (isset($req[$f->getFormName()])
                     && ($val = $req[$f->getFormName()])) {
-                $name = $f->get('name') ? db_real_escape($f->get('name'))
+                $name = $f->get('name') ? $f->get('name')
                     : 'field_'.$f->get('id');
-                $cwhere = "cdata.\"$name\" LIKE '%".db_real_escape($val)."%'";
                 if ($f->getImpl()->hasIdValue() && is_numeric($val))
-                    $cwhere .= " OR cdata.\"{$name}_id\" = ".db_input($val);
+                    $cwhere = "cdata.`{$name}_id` = ".db_input($val);
+                else
+                    $cwhere = "cdata.`$name` LIKE '%".db_real_escape($val)."%'";
                 $where .= ' AND ('.$cwhere.')';
                 $cdata_search = true;
             }
@@ -232,7 +235,8 @@ class TicketsAjaxAPI extends AjaxController {
             $sections[] = "$select $from $where";
 
         $sql=implode(' union ', $sections);
-        $res = db_query($sql);
+        if (!($res = db_query($sql)))
+            return TicketForm::dropDynamicDataView();
 
         $tickets = array();
         while ($row = db_fetch_row($res))
@@ -263,7 +267,7 @@ class TicketsAjaxAPI extends AjaxController {
     function acquireLock($tid) {
         global $cfg,$thisstaff;
 
-        if(!$tid or !is_numeric($tid) or !$thisstaff or !$cfg or !$cfg->getLockTime())
+        if(!$tid || !is_numeric($tid) || !$thisstaff || !$cfg || !$cfg->getLockTime())
             return 0;
 
         if(!($ticket = Ticket::lookup($tid)) || !$ticket->checkStaffAccess($thisstaff))
@@ -290,10 +294,10 @@ class TicketsAjaxAPI extends AjaxController {
     function renewLock($tid, $id) {
         global $thisstaff;
 
-        if(!$id or !is_numeric($id) or !$thisstaff)
+        if(!$tid || !is_numeric($tid) || !$id || !is_numeric($id) || !$thisstaff)
             return $this->json_encode(array('id'=>0, 'retry'=>true));
 
-        $lock= TicketLock::lookup($id);
+        $lock= TicketLock::lookup($id, $tid);
         if(!$lock || !$lock->getStaffId() || $lock->isExpired()) //Said lock doesn't exist or is is expired
             return self::acquireLock($tid); //acquire the lock
 

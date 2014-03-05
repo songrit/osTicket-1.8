@@ -148,7 +148,12 @@ $(document).ready(function(){
      });
 
     $('select#tpl_options').change(function() {
-        $(this).closest('form').submit();
+        var $this = $(this), form = $this.closest('form');
+        if ($this.val() % 1 !== 0) {
+            $('[name="a"]', form).val('implement');
+            $this.attr('name', 'code_name');
+        }
+        form.submit();
      });
 
     $(".clearrule").live('click',function() {
@@ -191,7 +196,7 @@ $(document).ready(function(){
                             if (redactor)
                                 redactor.insertHtml(canned.response);
                             else
-                                box.val(canned.response);
+                                box.val(box.val() + canned.response);
                         }
                         else {
                             if (redactor)
@@ -371,6 +376,13 @@ $(document).ready(function(){
         return false;
     });
 
+    $(document).keydown(function(e) {        
+        if (e.keyCode == 27) {
+            $('div.dialog').hide();
+            $('#overlay').hide();
+        }  
+    });
+
     /* advanced search */
     $('.dialog#advanced-search').css({
         top  : ($(window).height() / 6),
@@ -389,15 +401,6 @@ $(document).ready(function(){
         $('#overlay').show();
         $('#advanced-search').show();
     });
-
-
-    $(document).on('click', 'a#new-ticket', function(e) {
-        e.preventDefault();
-        var $elem = $(this);
-        $.userLookup('ajax.php/users/lookup/form', function (user) {
-            window.location.href = $elem.attr('href')+'&uid='+user.id;
-           });
-     });
 
     $.userLookup = function (url, callback) {
 
